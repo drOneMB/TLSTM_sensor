@@ -1,0 +1,82 @@
+import tensorflow as tf
+from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Bidirectional, LSTM, Dense, Dropout
+from keras.layers import Input, LSTM, Dense, Concatenate, Flatten
+
+class TLSTMCell(Layer):
+    def __init__(self, units, **kwargs):
+        super(TLSTMCell, self).__init__(**kwargs)
+        self.units = units  # Number of hidden units
+        self.state_size = (self.units, self.units)  # Hidden state and cell state sizes
+
+    def build(self, input_shape):
+        # Input shape: (batch_size, time_steps, 4)
+        # The last dimension is the time interval (delta_t)
+        input_dim = input_shape[-1] - 1  # Exclude the time interval dimension (x, y, z)
+
+        # LSTM weights
+        self.kernel = self.add_weight(shape=(input_dim, self.units * 4),
+                                     name='kernel',
+                                     initializer='glorot_uniform')
+        self.recurrent_kernel = self.add_weight(shape=(self.units, self.units * 4),
+                                                name='recurrent_kernel',
+                                                initializer='orthogonal')
+        self.bias = self.add_weight(shape=(self.units * 4,),
+                                    name='bias',
+                                    initializer='zeros')
+
+        # Time decay weights
+        self.time_decay = self.add_weight(shape=(self.units,),
+                                          name='time_decay',
+                                          initializer='zeros')
+
+        self.built = True
+
+    def call(self, inputs, states):
+        # Split inputs into data (x, y, z) and time intervals
+        xyz = inputs[:, :-1]  # Input data (batch_size, 3) for x, y, z
+        delta_t = inputs[:, -1:]  # Time intervals (batch_size, 1)
+
+        # Previous hidden state and cell state
+        h_tm1, c_tm1 = states
+
+        # Time decay factor
+        decay = tf.exp(-tf.maximum(0.0, self.time_decay * delta_t))
+        c_tm1_decayed = decay * c_tm1
+
+        # LSTM computations
+        z = tf.matmul(xyz, self.kernel) + tf.matmul(h_tm1, self.recurrent_kernel) + self.bias
+        z0, z1, z2, z3 = tf.split(z, 4, axis=-1)
+
+        i = tf.sigmoid(z0)  # Input gate
+        f = tf.sigmoid(z1)  # Forget gate
+        o = tf.sigmoid(z2)  # Output gate
+        c_candidate = tf.tanh(z3)  # Candidate cell state
+
+        # Update cell state
+        c_t = f * c_tm1_decayed + i * c_candidate
+        h_t = o * tf.tanh(c_t)  # Output hidden state
+
+        return h_t, [h_t, c_t]
+
+    def get_config(self):
+        config = super(TLSTMCell, self).get_config()
+        config.update({'units': self.units})
+        return config
+
+# Create a T-LSTM model
+def create_tlstm_model(input_shape):
+    inputs = Input(shape=input_shape)
+    tlstm_cell = TLSTMCell(units=50)
+    lstm_layer = tf.keras.layers.RNN(tlstm_cell, return_sequences=False)
+    lstm_out = lstm_layer(inputs)
+    flat_input = Flatten()(inputs)
+    dense_out = Dense(50, activation='relu')(flat_input)
+    # Merge the outputs of LSTM and Dense branches
+    merged = Concatenate()([lstm_out, dense_out])
+    # Further dense layers for the merged result
+    dense_out = Dense(20, activation='relu')(merged)
+    final_output = Dense(1, activation='sigmoid')(dense_out)
+    model = Model(inputs=inputs, outputs=final_output)
+    model.compile(optimizer='adam', loss='binary_crossentropy', metrics=['accuracy'])
+    return model
